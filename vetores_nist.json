@@ -1,0 +1,74 @@
+[
+  {
+    "id_teste": "AES-128-ECB",
+    "modo": "ECB",
+    "chave_hex": "2B7E151628AED2A6ABF7158809CF4F3C",
+    "iv_hex": null,
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "3AD77BB40D7A3660A89ECAF32466EF97"
+  },
+  {
+    "id_teste": "AES-192-ECB",
+    "modo": "ECB",
+    "chave_hex": "8E73B0F7DA0E6452C810F32B809079E562F8EAD2522C6B7B",
+    "iv_hex": null,
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "BD334F1D6E45F25FF712A214571FA5CC"
+  },
+  {
+    "id_teste": "AES-256-ECB",
+    "modo": "ECB",
+    "chave_hex": "603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4",
+    "iv_hex": null,
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "F3EED1BDB5D2A03C064B5A7E3DB181F8"
+  },
+  {
+    "id_teste": "AES-128-CBC",
+    "modo": "CBC",
+    "chave_hex": "2B7E151628AED2A6ABF7158809CF4F3C",
+    "iv_hex": "000102030405060708090A0B0C0D0E0F",
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "7649ABAC8119B246CEE98E9B12E9197D"
+  },
+  {
+    "id_teste": "AES-192-CBC",
+    "modo": "CBC",
+    "chave_hex": "8E73B0F7DA0E6452C810F32B809079E562F8EAD2522C6B7B",
+    "iv_hex": "000102030405060708090A0B0C0D0E0F",
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "4F021DB243BC633D7178183A9FA071E8"
+  },
+  {
+    "id_teste": "AES-256-CBC",
+    "modo": "CBC",
+    "chave_hex": "603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4",
+    "iv_hex": "000102030405060708090A0B0C0D0E0F",
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "F58C4C04D6E5F1BA779EABFB5F7BFBD6"
+  },
+  {
+    "id_teste": "AES-128-CFB",
+    "modo": "CFB",
+    "chave_hex": "2B7E151628AED2A6ABF7158809CF4F3C",
+    "iv_hex": "000102030405060708090A0B0C0D0E0F",
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "3B3FD92EB72DAD20333449F8E83CFB4A"
+  },
+  {
+    "id_teste": "AES-192-CFB",
+    "modo": "CFB",
+    "chave_hex": "8E73B0F7DA0E6452C810F32B809079E562F8EAD2522C6B7B",
+    "iv_hex": "000102030405060708090A0B0C0D0E0F",
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "CDC80D6FDDF18CAB34C25909C99A4174"
+  },
+  {
+    "id_teste": "AES-256-CFB",
+    "modo": "CFB",
+    "chave_hex": "603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4",
+    "iv_hex": "000102030405060708090A0B0C0D0E0F",
+    "texto_plano_hex": "6BC1BEE22E409F96E93D7E117393172A",
+    "texto_cifrado_esperado": "DC7E84BFDA79164B7ECD8486985D3860"
+  }
+]
