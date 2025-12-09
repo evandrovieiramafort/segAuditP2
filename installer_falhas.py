@@ -3,91 +3,69 @@ import os
 import logging
 import json
 
-PASTA_DESTINO = "downloads_pypi_falhas"
-ARQUIVO_TEMP_FALHAS = "temp_falhas.json"
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-def retry_downloads():
-    if not os.path.exists(PASTA_DESTINO):
-        os.makedirs(PASTA_DESTINO)
-        logging.info(f"Pasta '{PASTA_DESTINO}' criada para as tentativas.")
-
-    bibliotecas_falhas = []
-
-    if os.path.exists(ARQUIVO_TEMP_FALHAS):
-        try:
-            with open(ARQUIVO_TEMP_FALHAS, "r") as f:
-                bibliotecas_falhas = json.load(f)
-            logging.info(f"Carregada lista dinâmica de falhas com {len(bibliotecas_falhas)} itens.")
-        except Exception as e:
-            logging.error(f"Erro ao ler arquivo temporário de falhas: {e}")
-    else:
-        logging.info("Nenhum arquivo de falhas anteriores encontrado. Nada a recuperar.")
-
-
-    if not bibliotecas_falhas:
-        logging.info("A lista de falhas está vazia ou inacessível. Tudo certo!")
+def recuperar_falhas(arquivo_falhas_temp, pasta_destino):
+    """
+    Tenta baixar apenas o código fonte dos pacotes que falharam anteriormente
+    e exibe um relatório final.
+    """
+    if not os.path.exists(arquivo_falhas_temp):
         return
 
-    total_falhas = len(bibliotecas_falhas)
-    logging.info(f"Iniciando tentativa de recuperação para {total_falhas} pacotes...")
+    try:
+        with open(arquivo_falhas_temp, "r") as f:
+            bibliotecas_falhas = json.load(f)
+    except:
+        return
 
-    sucessos = 0
-    falhas = 0
+    if not bibliotecas_falhas:
+        return
 
-    for i, package in enumerate(bibliotecas_falhas, 1):
-        logging.info(f"[{i}/{total_falhas}] 🔄 Tentando baixar fonte de: {package}...")
+    logging.info(f"Tentando recuperar {len(bibliotecas_falhas)} falhas em '{pasta_destino}'...")
 
-        comando = [
-            "pip", "download", package,
-            "-d", PASTA_DESTINO,
-            "--no-binary", ":all:",
-            "--no-deps"
-        ]
+    if not os.path.exists(pasta_destino):
+        os.makedirs(pasta_destino)
 
-        try:
-            processo = subprocess.run(
-                comando,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=180
-            )
+    recuperados = []
+    perdidos = []
 
-            if processo.returncode == 0:
-                logging.info(f"✅ SUCESSO (Fonte): {package}")
-                sucessos += 1
-            else:
-                logging.warning(f"❌ AINDA FALHOU: {package}")
-                erro_limpo = "Erro desconhecido"
-                if processo.stderr:
-                    linhas_erro = [L for L in processo.stderr.strip().split('\n') if L.strip()]
-                    if linhas_erro:
-                        erro_limpo = linhas_erro[-1]
+    for package in bibliotecas_falhas:
+        logging.info(f"Tentando fonte (source-only): {package}")
 
-                logging.error(f"   Detalhe: {erro_limpo}")
-                falhas += 1
+        # Capturamos o retorno do processo
+        proc = subprocess.run(
+            ["pip", "download", package, "-d", pasta_destino, "--no-binary", ":all:", "--no-deps"],
+            capture_output=True,
+            timeout=180
+        )
 
-        except subprocess.TimeoutExpired:
-            logging.error(f"⏰ Timeout (3min) esgotado ao tentar baixar {package}")
-            falhas += 1
-        except Exception as e:
-            logging.error(f"💥 Erro crítico (Exceção Python): {e}")
-            falhas += 1
+        # Se returncode for 0, o download funcionou
+        if proc.returncode == 0:
+            recuperados.append(package)
+        else:
+            perdidos.append(package)
 
-    if os.path.exists(ARQUIVO_TEMP_FALHAS):
-        try:
-            os.remove(ARQUIVO_TEMP_FALHAS)
-        except:
-            pass
+    # Limpeza do arquivo temporário
+    try:
+        os.remove(arquivo_falhas_temp)
+    except:
+        pass
 
-    logging.info("-" * 30)
-    logging.info(f"Recuperação concluída. Recuperados: {sucessos} | Perdidos: {falhas}")
-    logging.info(f"Verifique a pasta: {os.path.abspath(PASTA_DESTINO)}")
+    # --- Relatório Final ---
+    logging.info("-" * 40)
+    logging.info("RELATÓRIO DE RECUPERAÇÃO DE FALHAS")
+    logging.info("-" * 40)
 
+    if recuperados:
+        logging.info(f"✅ SUCESSO - Recuperados ({len(recuperados)}):")
+        logging.info(f"   {', '.join(recuperados)}")
+    else:
+        logging.info("⚠️ Nenhum pacote foi recuperado nesta etapa.")
 
-if __name__ == "__main__":
-    retry_downloads()
+    if perdidos:
+        logging.warning(f"❌ FALHA FINAL - Não foi possível baixar ({len(perdidos)}):")
+        logging.warning(f"   {', '.join(perdidos)}")
+    else:
+        logging.info("✨ Todos os pacotes perdidos foram recuperados com sucesso!")
+
+    logging.info("-" * 40)

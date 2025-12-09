@@ -1,22 +1,10 @@
-# Os arquivos do NIST e o excel
 docs/
-
-# Os venv's
 audit_venvs/
-
-# As pastas de download
 downloads_pypi/
 downloads_pypi_falhas/
-
-# Caches
 __pycache__/
 *.pyc
-
-# Logs
 *.log
-
-# relatório final
 relatorio_auditoria_nist.xlsx
-
-# json temporário de bibliotecas que não deram pra baixar
 temp_falhas.json
+vetores_nist.json

@@ -5,228 +5,178 @@ import shutil
 import json
 import logging
 import openpyxl
-from pathlib import Path
-
-ARQUIVO_REFERENCIA = os.path.join("docs", "stats.xlsx")
-DIR_DOWNLOADS = "downloads_pypi"
-DIR_DOWNLOADS_FALHAS = "downloads_pypi_falhas"
-DIR_VENVS = "audit_venvs"
-ARQUIVO_REPORT = "relatorio_auditoria_nist.xlsx"
-RUNNER_SCRIPT = "runner.py"
-DATA_FILE = "vetores_nist.json"
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
-def setup_excel_and_get_headers():
+def setup_excel_report(arquivo_vetores):
     try:
-        with open(DATA_FILE, "r") as f:
+        with open(arquivo_vetores, "r", encoding='utf-8') as f:
             vectors = json.load(f)
-            # Extrai IDs usando a nova chave "id_teste"
             test_headers = [v["id_teste"] for v in vectors]
     except:
-        test_headers = ["TESTES_NAO_CARREGADOS"]
+        test_headers = ["ERRO_LEITURA_VETORES"]
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Auditoria NIST"
 
-    static_headers_pre = ["Ranking", "Biblioteca", "Arquivo Usado", "Downloads (Mês)", "Status Instalação"]
-    static_headers_pos = ["Tempo Enc (ms)", "Tempo Dec (ms)", "Score Final"]
-
-    ws.append(static_headers_pre + test_headers + static_headers_pos)
+    static_pre = ["Ranking", "Biblioteca", "Arquivo Usado", "Downloads (Mês)", "Status Instalação"]
+    static_pos = ["Tempo Enc (ms)", "Tempo Dec (ms)", "Score Final"]
+    ws.append(static_pre + test_headers + static_pos)
     return wb, ws, test_headers
 
 
-def encontrar_arquivo_instalacao(nome_biblioteca):
-    nome_norm = nome_biblioteca.lower().replace('-', '_')
-    dirs_to_search = [DIR_DOWNLOADS, DIR_DOWNLOADS_FALHAS]
-    for d in dirs_to_search:
+def encontrar_arquivo(nome_lib, lista_diretorios):
+    nome_norm = nome_lib.lower().replace('-', '_')
+    for d in lista_diretorios:
         if not os.path.exists(d): continue
         for f in os.listdir(d):
             f_lower = f.lower()
-            if f_lower.startswith(f"{nome_norm}-") or \
-                    f_lower.startswith(f"{nome_norm}_") or \
-                    f_lower.startswith(f"{nome_norm}."):
-                return os.path.join(d, f)
-            if f_lower == nome_norm:
+            if f_lower.startswith(nome_norm) or f_lower == nome_norm:
                 return os.path.join(d, f)
     return None
 
 
 def criar_venv(path):
-    if os.path.exists(path): shutil.rmtree(path)
+    if os.path.exists(path):
+        try:
+            shutil.rmtree(path)
+        except:
+            pass
     subprocess.run([sys.executable, "-m", "venv", path], check=True)
 
 
-def get_venv_python(venv_path):
-    return os.path.join(venv_path, "Scripts", "python.exe") if os.name == 'nt' else os.path.join(venv_path, "bin",
-                                                                                                 "python")
+def get_venv_bin(venv_path, bin_name):
+    if os.name == 'nt':
+        return os.path.join(venv_path, "Scripts", f"{bin_name}.exe")
+    return os.path.join(venv_path, "bin", bin_name)
 
 
-def get_venv_pip(venv_path):
-    return os.path.join(venv_path, "Scripts", "pip.exe") if os.name == 'nt' else os.path.join(venv_path, "bin", "pip")
+def executar_auditoria(arquivo_referencia, dirs_downloads, dir_venvs, arquivo_runner, arquivo_vetores,
+                       arquivo_saida_relatorio):
+    logging.info(f"Preparando relatório em: {arquivo_saida_relatorio}")
+    wb, ws, test_headers = setup_excel_report(arquivo_vetores)
 
-
-def calcular_ranking_final(audit_results, test_headers):
-    total_libs = len(audit_results)
-
-    # Score Base (Absoluto)
-    for item in audit_results:
-        score = 0
-        if item["status"] == "SUCESSO":
-            score += 1
-
-        for t_id in test_headers:
-            if item["tests"].get(t_id) == "PASS":
-                score += 1
-
-        item["temp_score"] = score
-
-    # Ranking de Downloads
-    sorted_by_down = sorted(audit_results, key=lambda x: x["downloads"], reverse=True)
-    for rank, item in enumerate(sorted_by_down):
-        points = total_libs - rank
-        item["temp_score"] += points
-
-    # Ranking de Tempo Enc
-    valid_enc = [x for x in audit_results if x["enc_time"] > 0]
-    sorted_enc = sorted(valid_enc, key=lambda x: x["enc_time"])
-    for rank, item in enumerate(sorted_enc):
-        points = total_libs - rank
-        item["temp_score"] += points
-
-    # Ranking de Tempo Dec
-    valid_dec = [x for x in audit_results if x["dec_time"] > 0]
-    sorted_dec = sorted(valid_dec, key=lambda x: x["dec_time"])
-    for rank, item in enumerate(sorted_dec):
-        points = total_libs - rank
-        item["temp_score"] += points
-
-    final_ranking = sorted(audit_results, key=lambda x: x["temp_score"], reverse=True)
-    return final_ranking
-
-
-def auditar_pacotes():
-    if not os.path.exists(RUNNER_SCRIPT) or not os.path.exists(DATA_FILE) or not os.path.exists(ARQUIVO_REFERENCIA):
-        logging.error("Arquivos essenciais não encontrados.")
-        return
-
-    wb, ws, test_headers = setup_excel_and_get_headers()
-
-    logging.info(f"Lendo dados de referência: {ARQUIVO_REFERENCIA}")
     bibliotecas_map = {}
     try:
-        wb_ref = openpyxl.load_workbook(ARQUIVO_REFERENCIA)
+        wb_ref = openpyxl.load_workbook(arquivo_referencia)
         ws_ref = wb_ref.active
         for row in ws_ref.iter_rows(min_row=2, values_only=True):
-            if row[0]:
-                try:
-                    downloads = int(row[2]) if row[2] else 0
-                except:
-                    downloads = 0
-                bibliotecas_map[row[0]] = downloads
+            if row[0]: bibliotecas_map[row[0]] = row[2] if row[2] else 0
     except Exception as e:
-        logging.error(f"Erro ao ler Excel: {e}")
+        logging.error(f"Erro ao ler referência: {e}")
         return
 
-    bibliotecas_alvo = list(bibliotecas_map.keys())
-    logging.info(f"Auditando {len(bibliotecas_alvo)} pacotes...")
+    libs_alvo = list(bibliotecas_map.keys())
+    logging.info(f"Iniciando auditoria de {len(libs_alvo)} bibliotecas...")
 
-    if not os.path.exists(DIR_VENVS): os.makedirs(DIR_VENVS)
+    for i, nome_lib in enumerate(libs_alvo):
+        logging.info(f"[{i + 1}/{len(libs_alvo)}] Processando: {nome_lib}...")
 
-    audit_data_list = []
-
-    for i, nome_lib in enumerate(bibliotecas_alvo):
-        logging.info(f"[{i + 1}/{len(bibliotecas_alvo)}] Auditando: {nome_lib}...")
-
-        downloads_count = bibliotecas_map.get(nome_lib, 0)
-        arquivo_path = encontrar_arquivo_instalacao(nome_lib)
+        arquivo_path = encontrar_arquivo(nome_lib, dirs_downloads)
 
         lib_data = {
             "lib": nome_lib,
-            "file": os.path.basename(arquivo_path) if arquivo_path else "NÃO ENCONTRADO",
-            "downloads": downloads_count,
-            "status": "DOWNLOAD FALHOU" if not arquivo_path else "FALHA INSTALAÇÃO",
+            "file": os.path.basename(arquivo_path) if arquivo_path else "N/A",
+            "downloads": bibliotecas_map.get(nome_lib, 0),
+            "status": "ARQUIVO AUSENTE" if not arquivo_path else "FALHA INSTALAÇÃO",
             "tests": {k: "-" for k in test_headers},
-            "enc_time": 0,
-            "dec_time": 0,
-            "temp_score": 0
+            "enc": 0, "dec": 0
         }
 
-        if not arquivo_path:
-            audit_data_list.append(lib_data)
-            continue
+        if arquivo_path:
+            venv_path = os.path.join(dir_venvs, f"venv_{nome_lib}")
+            try:
+                criar_venv(venv_path)
+                pip = get_venv_bin(venv_path, "pip")
+                python = get_venv_bin(venv_path, "python")
 
-        venv_path = os.path.join(DIR_VENVS, f"venv_{nome_lib}")
-        criar_venv(venv_path)
-        pip_cmd = get_venv_pip(venv_path)
-        python_cmd = get_venv_python(venv_path)
+                # Instala dependências básicas
+                subprocess.run([pip, "install", "cryptography"], capture_output=True)
 
-        subprocess.run([pip_cmd, "install", "cryptography"], capture_output=True)
+                # Instala lib alvo (TIMEOUT AUMENTADO + ENCODING FIX)
+                proc_inst = subprocess.run(
+                    [pip, "install", arquivo_path],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',  # Força UTF-8
+                    errors='replace',  # Substitui caracteres bugados por '?'
+                    timeout=120  # Aumentado para 120s
+                )
 
-        try:
-            proc = subprocess.run([pip_cmd, "install", arquivo_path], capture_output=True, text=True, timeout=120)
+                if proc_inst.returncode == 0:
+                    lib_data["status"] = "SUCESSO"
 
-            if proc.returncode == 0:
-                lib_data["status"] = "SUCESSO"
-                nome_import = nome_lib.replace('-', '_')
-
-                try:
+                    # Roda o runner (ENCODING FIX)
                     proc_test = subprocess.run(
-                        [python_cmd, RUNNER_SCRIPT, nome_import],
-                        capture_output=True, text=True, timeout=60, cwd=os.getcwd()
+                        [python, arquivo_runner, nome_lib],
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=40,
+                        cwd=os.path.dirname(arquivo_runner)
                     )
 
                     if proc_test.returncode == 0:
                         try:
                             res = json.loads(proc_test.stdout)
-                            for t_id in test_headers:
-                                lib_data["tests"][t_id] = res.get(t_id, "N/A")
-
-                            lib_data["enc_time"] = res.get("enc_time", 0)
-                            lib_data["dec_time"] = res.get("dec_time", 0)
-
+                            if "error" in res:
+                                erro_msg = res.get('error', 'Erro Genérico')
+                                status_code = res.get('status', 'FAIL')
+                                lib_data["status"] = f"FALHA ({status_code}): {erro_msg}"
+                            else:
+                                for t_id in test_headers:
+                                    lib_data["tests"][t_id] = res.get(t_id, "FAIL")
+                                lib_data["enc"] = res.get("enc_time", 0)
+                                lib_data["dec"] = res.get("dec_time", 0)
                         except:
-                            lib_data["status"] = "ERRO JSON"
+                            lib_data["status"] = "ERRO JSON (Saída inválida do Runner)"
                     else:
-                        lib_data["status"] = "ERRO RUNNER"
-                except subprocess.TimeoutExpired:
-                    lib_data["status"] = "TIMEOUT TESTE"
+                        erro_runner = "Erro desconhecido"
+                        if proc_test.stderr:
+                            linhas_erro = [l for l in proc_test.stderr.strip().split('\n') if l.strip()]
+                            if linhas_erro: erro_runner = linhas_erro[-1]
 
-        except subprocess.TimeoutExpired:
-            lib_data["status"] = "TIMEOUT INSTALAÇÃO"
+                        lib_data["status"] = f"CRASH RUNNER: {erro_runner}"
+                else:
+                    erro_pip = "Erro desconhecido"
+                    if proc_inst.stderr:
+                        linhas_erro = [l for l in proc_inst.stderr.strip().split('\n') if l.strip()]
+                        if linhas_erro: erro_pip = linhas_erro[-1]
 
-        audit_data_list.append(lib_data)
-        try:
-            shutil.rmtree(venv_path)
-        except:
-            pass
+                    lib_data["status"] = f"ERRO INSTALL: {erro_pip}"
 
-    logging.info("Calculando Ranking Competitivo...")
-    ranked_list = calcular_ranking_final(audit_data_list, test_headers)
+            except subprocess.TimeoutExpired:
+                lib_data["status"] = "TIMEOUT (Instalação demorou > 120s)"
+                logging.error(f"   ⌛ TIMEOUT na instalação")
+            except Exception as e:
+                logging.error(f"Erro venv: {e}")
+                lib_data["status"] = f"EXCEÇÃO VENV: {str(e)}"
+            finally:
+                try:
+                    shutil.rmtree(venv_path)
+                except:
+                    pass
 
-    for rank, item in enumerate(ranked_list, 1):
-        row = [
-            rank,
-            item["lib"],
-            item["file"],
-            item["downloads"],
-            item["status"]
-        ]
+        # --- LOG DETALHADO ---
+        status = lib_data["status"]
+        if status == "SUCESSO":
+            logging.info(f"   ✅ SUCESSO! (Enc: {lib_data['enc']:.2f}ms)")
+        elif "ARQUIVO AUSENTE" in status:
+            logging.warning(f"   ⚠️  PULADO: Arquivo não baixado.")
+        elif "NOT_FOUND" in status or "Implementation not found" in status:
+            logging.warning(f"   ⛔ SEM CLASSE AES: Pacote instalado, mas sem AES visível.")
+        elif "ERRO INSTALL" in status:
+            logging.error(f"   ❌ {status}")
+        elif "TIMEOUT" in status:
+            logging.error(f"   ⌛ {status}")
+        else:
+            logging.error(f"   ❌ FALHA: {status}")
 
-        for t_id in test_headers:
-            row.append(item["tests"].get(t_id, "-"))
-
-        row.append(item["enc_time"])
-        row.append(item["dec_time"])
-        row.append(item["temp_score"])
-
+        row = [i + 1, lib_data["lib"], lib_data["file"], lib_data["downloads"], lib_data["status"]]
+        for t_id in test_headers: row.append(lib_data["tests"].get(t_id, "-"))
+        row.extend([lib_data["enc"], lib_data["dec"], 0])
         ws.append(row)
 
-    wb.save(ARQUIVO_REPORT)
-    logging.info(f"Auditoria finalizada! Relatório salvo em: {ARQUIVO_REPORT}")
-
-
-if __name__ == "__main__":
-    auditar_pacotes()
+    wb.save(arquivo_saida_relatorio)
+    logging.info(f"Relatório final salvo em: {arquivo_saida_relatorio}")

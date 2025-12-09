@@ -5,19 +5,18 @@ import importlib
 import pkgutil
 import os
 import time
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
 
-# Carrega a nova estrutura de lista do JSON
+# --- CONFIGURAÇÃO INICIAL ---
 try:
     with open("vetores_nist.json", "r") as f:
         TEST_VECTORS = json.load(f)
 except Exception:
-    print(json.dumps({"error": "vetores_nist.json loading failed"}))
+    print(json.dumps({"error": "Falha ao ler vetores_nist.json", "status": "SETUP_ERROR"}))
     sys.exit(1)
 
 TARGET_LIB_ARG = sys.argv[1] if len(sys.argv) > 1 else None
 
+# Mapeamentos de Nomes (PyPI -> Import Python)
 KNOWN_MAPPINGS = {
     "pycrypto": "Crypto",
     "pycryptodome": "Crypto",
@@ -26,245 +25,309 @@ KNOWN_MAPPINGS = {
     "aes-python": "aes",
     "pure-python-aes": "aes",
     "pyaes": "pyaes",
-    "tlslite-ng": "tlslite"
+    "tlslite-ng": "tlslite",
+    "tlslite": "tlslite",
+    "oscrypto": "oscrypto",
+    "py3rijndael": "py3rijndael",
+    "aes": "aes",
+    "cryptography": "cryptography",
+    "phoenixaes": "phoenixAES"
+}
+
+# Locais Específicos (Sniper Mode)
+KNOWN_LOCATIONS = {
+    "tlslite": ["tlslite.utils.aes", "tlslite.utils.rijndael"],
+    "tlslite-ng": ["tlslite.utils.aes", "tlslite.utils.rijndael"],
+    "pyaes": ["pyaes"],  # Aponta para o pacote raiz onde as classes estão expostas
+    "cryptography": ["cryptography.hazmat.primitives.ciphers"]
 }
 
 
-def get_installed_top_level_modules():
-    modules = []
-    for path in sys.path:
-        if "site-packages" in path and os.path.isdir(path):
-            try:
-                for name in os.listdir(path):
-                    full_path = os.path.join(path, name)
-                    if os.path.isdir(full_path) and "." not in name and "__" not in name:
-                        modules.append(name)
-                    elif name.endswith(".py") and name != "__init__.py":
-                        modules.append(name[:-3])
-            except Exception:
-                pass
-    return list(set(modules))
+# --- ADAPTERS (Classes para corrigir libs fora do padrão) ---
+
+class PyaesAdapter:
+    """Adaptador para a lib 'pyaes' que usa classes distintas por modo"""
+
+    def __init__(self, key, mode, iv=None):
+        import pyaes
+        # Seleciona a classe correta baseada no modo
+        if mode == 1:  # ECB
+            self.cipher = pyaes.AESModeOfOperationECB(key)
+        elif mode == 2:  # CBC
+            if iv is None: iv = b'\0' * 16
+            self.cipher = pyaes.AESModeOfOperationCBC(key, iv=iv)
+        elif mode == 3:  # CFB
+            if iv is None: iv = b'\0' * 16
+            self.cipher = pyaes.AESModeOfOperationCFB(key, iv=iv, segment_size=16)
+        else:
+            raise ValueError(f"Modo {mode} não suportado pelo adaptador Pyaes")
+
+    def encrypt(self, data):
+        return self.cipher.encrypt(data)
+
+    def decrypt(self, data):
+        return self.cipher.decrypt(data)
+
+
+class Py3RijndaelAdapter:
+    """Adaptador para py3rijndael (exige block_size no init)"""
+
+    def __init__(self, key, mode, iv=None):
+        from py3rijndael import Rijndael
+        self.rijndael = Rijndael(key, block_size=16)
+        self.mode = mode
+        self.iv = iv
+
+    def encrypt(self, data):
+        return self.rijndael.encrypt(data)
+
+    def decrypt(self, data):
+        return self.rijndael.decrypt(data)
+
+
+class OscryptoAdapter:
+    """Adaptador para oscrypto (API funcional, não O.O.)"""
+
+    def __init__(self, key, mode, iv=None):
+        self.key = key
+        self.iv = iv or (b'\x00' * 16)
+        self.mode_str = 'ecb'
+        if mode == 2: self.mode_str = 'cbc'
+
+    def encrypt(self, data):
+        from oscrypto.symmetric import aes_cbc_encrypt, aes_ecb_encrypt
+        if self.mode_str == 'cbc':
+            ct, _ = aes_cbc_encrypt(self.key, data, self.iv)
+            return ct
+        return aes_ecb_encrypt(self.key, data)
+
+    def decrypt(self, data):
+        from oscrypto.symmetric import aes_cbc_decrypt, aes_ecb_decrypt
+        if self.mode_str == 'cbc':
+            return aes_cbc_decrypt(self.key, data, self.iv)
+        return aes_ecb_decrypt(self.key, data)
+
+
+class AesPackageAdapter:
+    """Adaptador para o pacote 'aes' (inteiros/listas)"""
+
+    def __init__(self, key, mode, iv=None):
+        from aes import aes
+        self.key_int = int.from_bytes(key, byteorder='big')
+        self.key_len = len(key) * 8
+        self.cipher = aes.aes(self.key_int, self.key_len)
+        self.mode = mode
+
+    def encrypt(self, data):
+        val = int.from_bytes(data, byteorder='big')
+        ct_list = self.cipher.enc_once(val)
+        if isinstance(ct_list, int): return ct_list.to_bytes(16, byteorder='big')
+        from aes.utils import arr8bit2int
+        return arr8bit2int(ct_list).to_bytes(16, byteorder='big')
+
+    def decrypt(self, data):
+        val = int.from_bytes(data, byteorder='big')
+        pt_list = self.cipher.dec_once(val)
+        if isinstance(pt_list, int): return pt_list.to_bytes(16, byteorder='big')
+        from aes.utils import arr8bit2int
+        return arr8bit2int(pt_list).to_bytes(16, byteorder='big')
+
+
+# ------------------------------------------------------------
+
+def get_special_adapter(lib_name, key, mode, iv):
+    """Fábrica de Adaptadores"""
+    lib_lower = lib_name.lower()
+
+    if "pyaes" in lib_lower:  # NOVO: Suporte explícito para pyaes
+        return PyaesAdapter(key, mode, iv)
+
+    if "py3rijndael" in lib_lower:
+        return Py3RijndaelAdapter(key, mode, iv)
+
+    if "oscrypto" in lib_lower:
+        if mode not in [1, 2]: return None
+        return OscryptoAdapter(key, mode, iv)
+
+    if lib_lower == "aes":
+        if mode != 1: return None
+        return AesPackageAdapter(key, mode, iv)
+
+    return None
 
 
 def find_aes_class_in_module(module, depth=0):
-    if depth > 2: return None
-    if hasattr(module, "AES"):
-        return module.AES
-    if hasattr(module, "new") and ("AES" in module.__name__.upper() or "aes" in module.__name__.lower()):
+    if depth > 3: return None
+    if hasattr(module, "AES"): return module.AES
+    if hasattr(module, "Aes"): return module.Aes
+
+    mod_name = module.__name__.lower()
+    if hasattr(module, "new") and ("aes" in mod_name or "rijndael" in mod_name or "crypto" in mod_name):
         return module
+
     if hasattr(module, "__path__"):
         try:
             for _, name, _ in pkgutil.iter_modules(module.__path__):
                 name_lower = name.lower()
-                if any(x in name_lower for x in ["cipher", "aes", "algo", "crypto", "block", "mode", "rijndael"]):
+                if any(x in name_lower for x in
+                       ["cipher", "aes", "algo", "crypto", "block", "mode", "rijndael", "utils"]):
                     try:
                         full_name = f"{module.__name__}.{name}"
-                        if full_name in sys.modules:
-                            sub_mod = sys.modules[full_name]
-                        else:
-                            sub_mod = importlib.import_module(full_name)
-                        res = find_aes_class_in_module(sub_mod, depth + 1)
-                        if res: return res
+                        sub_mod = sys.modules.get(full_name) or importlib.import_module(full_name)
+                        found = find_aes_class_in_module(sub_mod, depth + 1)
+                        if found: return found
                     except:
                         continue
-        except Exception:
+        except:
             pass
     return None
 
 
-def measure_performance(aes_cls, key_bin, iv_bin, pt_bin):
+def measure_performance(cipher_factory_lambda, pt_bin):
     try:
-        factory = aes_cls.new if hasattr(aes_cls, "new") else aes_cls
-        mode_const = getattr(aes_cls, "MODE_ECB", 1)
+        cipher = cipher_factory_lambda()
+        if not hasattr(cipher, 'encrypt'): return 0, 0
+        cipher.encrypt(pt_bin)
 
-        cipher = None
-        try:
-            cipher = factory(key_bin, mode_const)
-        except:
-            try:
-                cipher = factory(key=key_bin, mode=mode_const)
-            except:
-                return 0, 0
+        iters = 500
+        t1 = time.perf_counter()
+        for _ in range(iters):
+            c = cipher_factory_lambda()
+            c.encrypt(pt_bin)
+        t2 = time.perf_counter()
+        avg_enc = ((t2 - t1) / iters) * 1000
 
-        if not cipher or not hasattr(cipher, 'encrypt'): return 0, 0
+        temp_c = cipher_factory_lambda()
+        ct = temp_c.encrypt(pt_bin)
 
-        iterations = 200
-        t_start_enc = time.perf_counter()
-        ct = None
-        for _ in range(iterations):
-            ct = cipher.encrypt(pt_bin)
-        t_end_enc = time.perf_counter()
-
-        avg_enc = ((t_end_enc - t_start_enc) / iterations) * 1000
-
-        cipher_dec = cipher
-        if not hasattr(cipher_dec, 'decrypt'):
-            try:
-                cipher_dec = factory(key_bin, mode_const)
-            except:
-                pass
-
-        t_start_dec = time.perf_counter()
-        for _ in range(iterations):
-            cipher_dec.decrypt(ct)
-        t_end_dec = time.perf_counter()
-
-        avg_dec = ((t_end_dec - t_start_dec) / iterations) * 1000
+        t3 = time.perf_counter()
+        for _ in range(iters):
+            c = cipher_factory_lambda()
+            c.decrypt(ct)
+        t4 = time.perf_counter()
+        avg_dec = ((t4 - t3) / iters) * 1000
 
         return avg_enc, avg_dec
     except:
         return 0, 0
 
 
-def teste_generico(aes_cls, test_case):
+def teste_generico(aes_impl, test_case, lib_name):
     try:
-        # Mapeamento das novas chaves em PT-BR
-        key_bin = binascii.unhexlify(test_case["chave_hex"])
-        pt_bin = binascii.unhexlify(test_case["texto_plano_hex"])
-        expected_hex = test_case["texto_cifrado_esperado"]
-        iv_bin = binascii.unhexlify(test_case["iv_hex"]) if test_case["iv_hex"] else None
-        mode_name = test_case["modo"]
+        key = binascii.unhexlify(test_case["chave_hex"])
+        pt = binascii.unhexlify(test_case["texto_plano_hex"])
+        iv = binascii.unhexlify(test_case["iv_hex"]) if test_case["iv_hex"] else None
+        expected = test_case["texto_cifrado_esperado"]
 
-        mode_const = None
-        if mode_name == "ECB":
-            mode_const = getattr(aes_cls, "MODE_ECB", 1)
-        elif mode_name == "CBC":
-            mode_const = getattr(aes_cls, "MODE_CBC", 2)
-        elif mode_name == "CFB":
-            mode_const = getattr(aes_cls, "MODE_CFB", 3)
+        mode_val = 1  # ECB
+        if test_case["modo"] == "CBC":
+            mode_val = 2
+        elif test_case["modo"] == "CFB":
+            mode_val = 3
 
-        factory = aes_cls.new if hasattr(aes_cls, "new") else aes_cls
+        if aes_impl and not isinstance(aes_impl, str) and hasattr(aes_impl, "MODE_CBC"):
+            if test_case["modo"] == "CBC":
+                mode_val = getattr(aes_impl, "MODE_CBC")
+            elif test_case["modo"] == "CFB":
+                mode_val = getattr(aes_impl, "MODE_CFB")
+
+        factory_lambda = None
         cipher = None
 
-        try:
-            if mode_name == "ECB":
-                cipher = factory(key_bin, mode_const)
-            else:
-                cipher = factory(key_bin, mode_const, iv_bin)
-        except:
-            pass
+        # 1. Tenta Adapter (Prioridade para pyaes, oscrypto, etc)
+        adapter_instance = get_special_adapter(lib_name, key, mode_val, iv)
+        if adapter_instance:
+            cipher = adapter_instance
+            factory_lambda = lambda: get_special_adapter(lib_name, key, mode_val, iv)
 
-        if cipher is None:
+        # 2. Tenta Genérico
+        if not cipher and aes_impl:
+            factory = aes_impl.new if hasattr(aes_impl, "new") else aes_impl
             try:
-                kwargs = {'key': key_bin, 'mode': mode_const}
-                if mode_name != "ECB": kwargs['iv'] = iv_bin
-                cipher = factory(**kwargs)
+                args = [key, mode_val]
+                if test_case["modo"] != "ECB" and iv: args.append(iv)
+                cipher = factory(*args)
+                factory_lambda = lambda: factory(*args)
             except:
-                pass
+                try:
+                    kwargs = {'key': key, 'mode': mode_val}
+                    if test_case["modo"] != "ECB": kwargs['iv'] = iv
+                    cipher = factory(**kwargs)
+                    factory_lambda = lambda: factory(**kwargs)
+                except:
+                    pass
 
-        if cipher is None: return False, "Instanciacao falhou"
+        if not cipher: return False, "Instanciação falhou", None
 
-        if hasattr(cipher, "encrypt"):
-            ct = cipher.encrypt(pt_bin)
-            if isinstance(ct, str): ct = ct.encode('latin-1')
-            ct_hex = binascii.hexlify(ct).decode().upper()
-
-            if ct_hex == expected_hex:
-                return True, "SUCESSO"
-            return False, f"DIVERGENCIA: {ct_hex}"
-
-    except Exception as e:
-        return False, f"Erro: {str(e)}"
-
-    return False, "Metodo encrypt nao encontrado"
-
-
-def teste_cryptography_io(test_case):
-    try:
-        # Mapeamento das novas chaves em PT-BR
-        key_bin = binascii.unhexlify(test_case["chave_hex"])
-        pt_bin = binascii.unhexlify(test_case["texto_plano_hex"])
-        expected_hex = test_case["texto_cifrado_esperado"]
-        iv_bin = binascii.unhexlify(test_case["iv_hex"]) if test_case["iv_hex"] else None
-        mode_name = test_case["modo"]
-
-        algo = algorithms.AES(key_bin)
-        if mode_name == "ECB":
-            mode = modes.ECB()
-        elif mode_name == "CBC":
-            mode = modes.CBC(iv_bin)
-        elif mode_name == "CFB":
-            mode = modes.CFB(iv_bin)
-        else:
-            return False, "Modo inv"
-
-        backend = default_backend()
-        cipher = Cipher(algo, mode, backend=backend)
-        encryptor = cipher.encryptor()
-        ct = encryptor.update(pt_bin) + encryptor.finalize()
+        ct = cipher.encrypt(pt)
+        if isinstance(ct, str): ct = ct.encode('latin-1')
         ct_hex = binascii.hexlify(ct).decode().upper()
 
-        if ct_hex == expected_hex:
-            return True, "SUCESSO"
-        return False, f"DIVERGENCIA: {ct_hex}"
-    except:
-        return False, "N/A"
+        if ct_hex == expected: return True, "PASS", factory_lambda
+        return False, f"DIVERGÊNCIA: {ct_hex}", None
+
+    except Exception as e:
+        return False, f"CRASH: {str(e)}", None
 
 
 def run_tests():
-    results = {}
-    aes_implementation = None
+    if not TARGET_LIB_ARG: sys.exit(1)
 
+    raw = TARGET_LIB_ARG
     candidates = []
-    if TARGET_LIB_ARG:
-        clean_name = TARGET_LIB_ARG.split('-')[0].lower()
-        candidates.append(TARGET_LIB_ARG)
-        if clean_name in KNOWN_MAPPINGS:
-            candidates.append(KNOWN_MAPPINGS[clean_name])
+    if raw.lower() in KNOWN_MAPPINGS: candidates.append(KNOWN_MAPPINGS[raw.lower()])
+    candidates.append(raw.lower().replace('-', '_'))
+    candidates.append(raw)
 
-    installed_pkgs = get_installed_top_level_modules()
-    priority_from_installed = []
-    generic_from_installed = []
+    aes_impl = None
 
-    for pkg in installed_pkgs:
-        pkg_lower = pkg.lower()
-        if TARGET_LIB_ARG and (TARGET_LIB_ARG.lower() in pkg_lower or pkg_lower in TARGET_LIB_ARG.lower()):
-            priority_from_installed.append(pkg)
-        elif any(x in pkg_lower for x in ["crypto", "aes", "cipher", "security"]):
-            generic_from_installed.append(pkg)
+    # Lista de libs que usam Adapter e não precisam de busca de classe
+    special_libs = ["oscrypto", "py3rijndael", "aes", "pyaes"]
+    is_special = any(x in raw.lower() for x in special_libs)
+    if raw.lower() == "aes": is_special = True
 
-    final_search_list = list(dict.fromkeys(
-        priority_from_installed + candidates + generic_from_installed + ["Crypto", "Cryptodome", "pyaes",
-                                                                         "cryptography"]))
+    if not is_special:
+        if raw in KNOWN_LOCATIONS:
+            for loc in KNOWN_LOCATIONS[raw]:
+                try:
+                    mod = importlib.import_module(loc)
+                    aes_impl = find_aes_class_in_module(mod)
+                    if aes_impl: break
+                except:
+                    pass
 
-    for lib_name in final_search_list:
-        try:
-            mod = importlib.import_module(lib_name)
-            aes_implementation = find_aes_class_in_module(mod)
-            if aes_implementation:
-                break
-        except:
-            continue
+        if not aes_impl:
+            for cand in candidates:
+                try:
+                    mod = importlib.import_module(cand)
+                    aes_impl = find_aes_class_in_module(mod)
+                    if aes_impl: break
+                except:
+                    continue
 
-    passou_algum = False
-    for test_case in TEST_VECTORS:
-        test_id = test_case["id_teste"]  # Nova chave
-        passed = False
+    if not aes_impl and not is_special:
+        print(json.dumps({"error": "Implementation not found", "status": "NOT_FOUND"}))
+        sys.exit(1)
 
-        if aes_implementation:
-            passed, msg = teste_generico(aes_implementation, test_case)
+    results = {}
+    passou_algo = False
+    perf_factory = None
 
-        if not passed:
-            passed_c, msg_c = teste_cryptography_io(test_case)
-            if passed_c:
-                passed = True
-
-        if passed:
-            passou_algum = True
-
-        results[test_id] = "PASS" if passed else "FAIL"
+    for tc in TEST_VECTORS:
+        ok, msg, factory = teste_generico(aes_impl, tc, raw)
+        results[tc["id_teste"]] = "PASS" if ok else "FAIL"
+        if ok:
+            passou_algo = True
+            perf_factory = factory
 
     t_enc, t_dec = 0, 0
-    if aes_implementation and passou_algum and len(TEST_VECTORS) > 0:
-        perf_case = TEST_VECTORS[0]
-        # Nova chave para performance
-        k = binascii.unhexlify(perf_case["chave_hex"])
-        pt = binascii.unhexlify(perf_case["texto_plano_hex"])
-        t_enc, t_dec = measure_performance(aes_implementation, k, None, pt)
+    if passou_algo and perf_factory and len(TEST_VECTORS) > 0:
+        k = binascii.unhexlify(TEST_VECTORS[0]["chave_hex"])
+        pt = binascii.unhexlify(TEST_VECTORS[0]["texto_plano_hex"])
+        t_enc, t_dec = measure_performance(perf_factory, pt)
 
     results["enc_time"] = t_enc
     results["dec_time"] = t_dec
-
     print(json.dumps(results))
 
 
